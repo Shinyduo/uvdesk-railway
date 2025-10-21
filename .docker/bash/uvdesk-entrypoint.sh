@@ -1,45 +1,50 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Output color codes
-# https://en.wikipedia.org/wiki/ANSI_escape_code
+APP_ROOT="/var/www/uvdesk"
+PERSIST_ROOT="/data"                 # Mount a single Railway Volume here
+UPLOAD_DIR="$APP_ROOT/public/uploads" # Adjust if your uploads live elsewhere
 
-declare -r COLOR_NC='\033[0m'
-declare -r COLOR_RED='\033[0;31m'
-declare -r COLOR_GREEN='\033[0;32m'
-declare -r COLOR_LIGHT_GREEN='\033[1;32m'
-declare -r COLOR_YELLOW='\033[1;33m'
-declare -r COLOR_LIGHT_YELLOW='\033[0;33m'
-declare -r COLOR_BLUE='\033[0;34m'
-declare -r COLOR_LIGHT_BLUE='\033[1;34m'
-
-# Restart apache & mysql server
-service apache2 restart && service mysql restart;
-
-if [[ ! -z "$MYSQL_USER" && ! -z "$MYSQL_PASSWORD" && ! -z "$MYSQL_DATABASE" ]]; then
-    if [ "$(mysqladmin ping)" == "mysqld is alive" ]; then
-        # Mysql is up and running with default configuration
-
-        # Create default database if not found and grant non-root user all privileges to that database
-        # Note: Grant privileges will create user if it doesn't exists prior to mysql 8
-        mysql -u root -e "CREATE DATABASE IF NOT EXISTS $MYSQL_DATABASE";
-        mysql -u root -e "GRANT ALL PRIVILEGES ON $MYSQL_DATABASE.* To '$MYSQL_USER'@'localhost' IDENTIFIED BY '$MYSQL_PASSWORD'";
-
-        # Update root user credentials
-        mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASSWORD'";
-
-        # Create new mysql configuration files (root & uvdesk)
-        rm -f /etc/mysql/my.cnf /home/uvdesk/.my.cnf \
-            && echo -e "[client]\nuser = root\npassword = $MYSQL_ROOT_PASSWORD\nhost = localhost" >> /etc/mysql/my.cnf \
-            && echo -e "[client]\nuser = $MYSQL_USER\npassword = $MYSQL_PASSWORD\nhost = localhost" >> /home/uvdesk/.my.cnf;
-    else
-        echo -e "${COLOR_RED}Error: Failed to establish a connection with mysql server (localhost)${COLOR_NC}\n";
-        exit 1;
-    fi
-else
-    echo -e "${COLOR_LIGHT_YELLOW}Notice: Skipping configuration of local database - one or more mysql environment variables are not defined.${COLOR_NC}\n";
+# Ensure .env exists (first boot)
+if [ ! -f "$APP_ROOT/.env" ] && [ -f "$APP_ROOT/.env.example" ]; then
+  cp "$APP_ROOT/.env.example" "$APP_ROOT/.env" || true
 fi
 
-# Step down from sudo to uvdesk
-/usr/local/bin/gosu uvdesk "$@"
+# --- Single-volume persistence wiring (Railway gives one volume per service)
+mkdir -p "$PERSIST_ROOT/var" "$PERSIST_ROOT/uploads"
 
+# var/ (cache, logs, runtime)
+if [ ! -L "$APP_ROOT/var" ]; then
+  if [ -d "$APP_ROOT/var" ] && [ -n "$(ls -A "$APP_ROOT/var" 2>/dev/null)" ]; then
+    rsync -a "$APP_ROOT/var/" "$PERSIST_ROOT/var/" || true
+  fi
+  rm -rf "$APP_ROOT/var"
+  ln -s "$PERSIST_ROOT/var" "$APP_ROOT/var"
+fi
+
+# uploads
+if [ ! -L "$UPLOAD_DIR" ]; then
+  mkdir -p "$(dirname "$UPLOAD_DIR")"
+  if [ -d "$UPLOAD_DIR" ] && [ -n "$(ls -A "$UPLOAD_DIR" 2>/dev/null)" ]; then
+    rsync -a "$UPLOAD_DIR/" "$PERSIST_ROOT/uploads/" || true
+  fi
+  rm -rf "$UPLOAD_DIR"
+  ln -s "$PERSIST_ROOT/uploads" "$UPLOAD_DIR"
+fi
+
+# Permissions for Apache/PHP
+chown -R www-data:www-data "$PERSIST_ROOT" "$APP_ROOT" || true
+chmod -R 775 "$PERSIST_ROOT" "$APP_ROOT/var" "$(dirname "$UPLOAD_DIR")" || true
+
+# Clear+warm cache (non-fatal on first boot)
+php "$APP_ROOT/bin/console" cache:clear --env=prod --no-debug || true
+
+# Run DB migrations if DATABASE_URL is set (failsafe: ignore errors on first boot)
+if [ -n "${DATABASE_URL:-}" ]; then
+  php "$APP_ROOT/bin/console" doctrine:migrations:migrate --no-interaction || true
+fi
+
+# IMPORTANT: Do NOT start or touch local mysql here. Railway MySQL is a separate service.
+
+# Hand off to CMD (apachectl -D FOREGROUND)
 exec "$@"
