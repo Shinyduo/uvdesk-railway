@@ -80,10 +80,6 @@ RUN chown -R www-data:www-data /var/www/uvdesk && \
 RUN composer dump-autoload --optimize && \
     php bin/console cache:clear --env=prod --no-debug || true
 
-# --- Railway-specific: listen on $PORT and silence ServerName warning
-RUN printf 'Listen ${PORT:-8080}\n' > /etc/apache2/ports.conf && \
-    sed -i 's#<VirtualHost \*:80>#<VirtualHost *:${PORT:-8080}>#' /etc/apache2/sites-available/000-default.conf && \
-    printf '\nServerName ${APP_URL:-localhost}\n' >> /etc/apache2/apache2.conf
 
 ENV APACHE_RUN_USER=www-data \
     APACHE_RUN_GROUP=www-data
