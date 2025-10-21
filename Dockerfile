@@ -16,6 +16,7 @@ RUN apt-get update && \
         wget \
         git \
         unzip \
+        rsync \
         apache2 \
         php8.1 \
         libapache2-mod-php8.1 \
@@ -25,27 +26,31 @@ RUN apt-get update && \
         php8.1-mysql \
         php8.1-mailparse \
         php8.1-curl \
+        php8.1-intl \
+        php8.1-zip \
+        php8.1-gd \
+        php8.1-mbstring \
         ca-certificates \
         gnupg2 dirmngr && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# (Optional) non-root app user – not strictly needed for Railway, we’ll run Apache as www-data
+# Optional app user (Apache still runs as www-data)
 RUN adduser uvdesk --disabled-password --gecos ""
 
-# Apache configs from repo
+# Apache configs from repo (vhost will be patched to $PORT at runtime)
 COPY ./.docker/config/apache2/env /etc/apache2/envvars
 COPY ./.docker/config/apache2/httpd.conf /etc/apache2/apache2.conf
 COPY ./.docker/config/apache2/vhost.conf /etc/apache2/sites-available/000-default.conf
 
 # App code + entrypoint
-COPY ./.docker/bash/uvdesk-entrypoint.sh /usr/local/bin/
+COPY ./.docker/bash/uvdesk-entrypoint.sh /usr/local/bin/uvdesk-entrypoint.sh
 COPY . /var/www/uvdesk/
 
 # Enable PHP + rewrite; allow entrypoint to run
 RUN a2enmod php8.1 rewrite && \
     chmod +x /usr/local/bin/uvdesk-entrypoint.sh
 
-# Install gosu (kept for parity; not required by our entrypoint)
+# Install gosu (optional)
 RUN dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')" && \
     wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch" && \
     wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc" && \
@@ -80,10 +85,9 @@ RUN chown -R www-data:www-data /var/www/uvdesk && \
 RUN composer dump-autoload --optimize && \
     php bin/console cache:clear --env=prod --no-debug || true
 
-
 ENV APACHE_RUN_USER=www-data \
     APACHE_RUN_GROUP=www-data
 
-# Entrypoint hands off to Apache in foreground
+# Entrypoint writes PORT/ServerName at runtime and then starts Apache
 ENTRYPOINT ["/usr/local/bin/uvdesk-entrypoint.sh"]
 CMD ["apachectl","-D","FOREGROUND"]
